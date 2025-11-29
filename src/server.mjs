@@ -77,7 +77,7 @@ async function uploadTextToVectorStore(text) {
   const tmpDir = os.tmpdir();
   const tmpPath = path.join(
     tmpDir,
-    `yen-movie-${Date.now()}-${Math.random().toString(36).slice(2)}.jsonl`
+    `yen-movie-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
   );
 
   await fs.promises.writeFile(tmpPath, text, "utf8");

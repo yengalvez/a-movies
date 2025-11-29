@@ -77,7 +77,7 @@ async function uploadTextToVectorStore(text) {
   const tmpDir = os.tmpdir();
   const tmpPath = path.join(
     tmpDir,
-    `yen-movie-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+    `yen-movie-${Date.now()}-${Math.random().toString(36).slice(2)}.txt` // <- .txt, NO .jsonl
   );
 
   await fs.promises.writeFile(tmpPath, text, "utf8");
@@ -89,12 +89,34 @@ async function uploadTextToVectorStore(text) {
       purpose: "assistants",
     });
 
-    // 2) Adjuntarlo al vector store
-    await openai.beta.vectorStores.files.createAndPoll(VECTOR_STORE_ID, {
-      file_id: file.id,
-    });
+    // 2) Adjuntar el file al Vector Store usando la API HTTP directa
+    const resp = await fetch(
+      `https://api.openai.com/v1/vector_stores/${VECTOR_STORE_ID}/files`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+          "OpenAI-Beta": "assistants=v2",
+        },
+        body: JSON.stringify({ file_id: file.id }),
+      }
+    );
 
-    console.log("✅ Uploaded to vector store. file.id =", file.id);
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`Vector store attach failed ${resp.status}: ${body}`);
+    }
+
+    const vsFile = await resp.json();
+    console.log(
+      "✅ Uploaded to vector store. file.id =",
+      file.id,
+      "vsFile.id =",
+      vsFile.id
+    );
+
+    // El resto del código solo usa fileId
     return { fileId: file.id };
   } catch (err) {
     console.error("❌ Error uploading to vector store:", err);
@@ -103,6 +125,7 @@ async function uploadTextToVectorStore(text) {
     fs.promises.unlink(tmpPath).catch(() => {});
   }
 }
+
 
 // ---------- Helpers: Trakt -----------------------------------------------
 

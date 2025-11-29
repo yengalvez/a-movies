@@ -7,11 +7,23 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
 
-// Cargar variables de entorno
-dotenv.config();
+// Cargar .env SOLO si estamos en local (en Railway no hace falta)
+if (!process.env.RAILWAY_ENVIRONMENT) {
+  dotenv.config();
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// --- DEBUG: ver qué hay de OpenAI en el entorno ---
+console.log(
+  "DEBUG OPENAI VARS:",
+  Object.keys(process.env).filter((k) => k.includes("OPENAI"))
+);
+console.log(
+  "DEBUG has OPENAI_API_KEY?",
+  !!process.env.OPENAI_API_KEY
+);
 
 const {
   OPENAI_API_KEY,
@@ -25,12 +37,14 @@ if (!OPENAI_API_KEY) {
   console.error("❌ Missing OPENAI_API_KEY in environment");
   process.exit(1);
 }
+
 if (!VECTOR_STORE_ID) {
   console.error("❌ Missing VECTOR_STORE_ID in environment");
   process.exit(1);
 }
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
 
 const app = express();
 app.use(express.json());

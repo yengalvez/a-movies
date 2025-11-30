@@ -17,81 +17,52 @@ const openai = new OpenAI({
 
 const model = new OpenAIResponsesModel(openai, "gpt-5.1");
 
-// ---------- Config común ----------
-
 const YEN_BACKEND_URL =
-  process.env.YEN_BACKEND_URL || "https://a-movies-production.up.railway.app";
+  process.env.YEN_BACKEND_URL ||
+  "https://a-movies-production.up.railway.app";
 
-// ---------- Tool 1: marcar película/serie como vista ----------
+// ---------- Tool genérico 1: martillo Trakt ------------------------------
 
-const markSeenTool = tool({
-  name: "yen_mark_seen",
+const traktTool = tool({
+  name: "yen_trakt",
   description: `
-Marca una película o serie como vista en el backend de Yen.
-Escribe en el vector store y opcionalmente sincroniza con Trakt (/mark-seen).
+Martillo genérico para Trakt. 
+Permite llamar a CUALQUIER endpoint de la API de Trakt a través del backend de Yen.
+Úsalo para gestionar historial, watchlist u otras operaciones cuando conozcas
+o descubras el endpoint adecuado leyendo la documentación de Trakt en la web.
 `.trim(),
   parameters: z
     .object({
-      title: z.string().describe("Título de la película o serie."),
-      year: z
-        .number()
-        .int()
-        .nullable()
-        .describe("Año de estreno o null si no se sabe."),
-      trakt_id: z
+      method: z
+        .enum(["GET", "POST", "PUT", "DELETE"])
+        .describe("Método HTTP a usar contra Trakt."),
+      path: z
         .string()
-        .nullable()
-        .describe("ID de Trakt si se conoce, si no null."),
-      imdb: z
-        .string()
-        .nullable()
-        .describe("ID de IMDb (ej: tt0816692) o null."),
-      slug: z
-        .string()
-        .nullable()
-        .describe("Slug de Trakt si se conoce, o null."),
-      tmdb: z
-        .string()
-        .nullable()
-        .describe("ID de TMDB si se conoce, o null."),
-      rating: z
-        .number()
-        .nullable()
         .describe(
-          "Nota personal de Yen (0-10 aprox) o null si no ha dado nota."
+          "Ruta relativa de Trakt empezando por '/', por ejemplo '/sync/history/remove'."
         ),
-      liked: z
-        .boolean()
-        .nullable()
-        .describe("true si le ha gustado, false si no, o null si no aplica."),
-      tags: z
-        .array(z.string())
-        .nullable()
-        .describe(
-          "Lista de tags (ej: ['space','favorite']) o null si no hay tags."
-        ),
-      comment: z
+      bodyJson: z
         .string()
         .nullable()
-        .describe("Comentario libre de Yen o null."),
-      syncTrakt: z
-        .boolean()
-        .nullable()
         .describe(
-          "true para sincronizar con Trakt, false para solo vector store, null para dejar por defecto (true)."
+          "Cuerpo JSON como string (por ejemplo '{\"movies\":[...]}') o null si no hay body."
         ),
     })
     .strict(),
   strict: true,
-  async execute(args) {
-    const url = `${YEN_BACKEND_URL}/mark-seen`;
+  async execute({ method, path, bodyJson }) {
+    const url = `${YEN_BACKEND_URL}/trakt/proxy`;
 
     const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(args),
+      body: JSON.stringify({
+        method,
+        path,
+        bodyJson,
+      }),
     });
 
     const text = await res.text();
@@ -111,221 +82,111 @@ Escribe en el vector store y opcionalmente sincroniza con Trakt (/mark-seen).
   },
 });
 
-// ---------- Tool 2: importar historial de Trakt ----------
+// ---------- Tool genérico 2: martillo Memoria/Vector Store ---------------
 
-const importTraktHistoryTool = tool({
-  name: "yen_import_trakt_history",
+const memoryTool = tool({
+  name: "yen_memory",
   description: `
-Importa el historial de películas vistas desde Trakt al vector store
-usando el endpoint /import-trakt-history.
+Martillo genérico de memoria para Yen.
+Escribe o borra información en el vector store persistente de Yen (YenVectorMovies)
+a través del backend de Yen.
+
+Úsalo para:
+- Guardar gustos, moods, notas, listas de pelis vistas, reglas, webs favoritas, etc.
+- Opcionalmente, eliminar archivos completos del vector store cuando tengas su fileId.
+
+Para buscar o leer memoria, usa SIEMPRE file_search, no este tool.
 `.trim(),
   parameters: z
     .object({
-      limit: z
-        .number()
-        .int()
+      operation: z
+        .enum(["write", "delete"])
+        .describe(
+          "Operación a realizar: 'write' para escribir memoria, 'delete' para borrar un archivo concreto del vector store."
+        ),
+      payloadJson: z
+        .string()
         .nullable()
         .describe(
-          "Máximo de elementos a importar. Usa null para el valor por defecto del backend."
+          "Contenido a escribir cuando operation='write'. Debe ser un JSON string describiendo lo que quieres recordar."
+        ),
+      fileId: z
+        .string()
+        .nullable()
+        .describe(
+          "ID de archivo de vector store a eliminar cuando operation='delete'."
         ),
     })
     .strict(),
   strict: true,
-  async execute({ limit }) {
-    const url = `${YEN_BACKEND_URL}/import-trakt-history`;
+  async execute({ operation, payloadJson, fileId }) {
+    if (operation === "write") {
+      if (!payloadJson) {
+        throw new Error(
+          "yen_memory.write requiere payloadJson (string JSON) no nulo."
+        );
+      }
 
-    const body = { limit };
+      const res = await fetch(`${YEN_BACKEND_URL}/vector/write`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          payloadText: payloadJson,
+        }),
+      });
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+      const text = await res.text();
+      let json = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = { raw: text };
+      }
 
-    const text = await res.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = { raw: text };
+      return {
+        operation,
+        status: res.status,
+        ok: res.ok,
+        data: json,
+      };
+    } else {
+      if (!fileId) {
+        throw new Error(
+          "yen_memory.delete requiere fileId (string) no nulo."
+        );
+      }
+
+      const res = await fetch(`${YEN_BACKEND_URL}/vector/delete-file`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          file_id: fileId,
+        }),
+      });
+
+      const text = await res.text();
+      let json = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = { raw: text };
+      }
+
+      return {
+        operation,
+        status: res.status,
+        ok: res.ok,
+        data: json,
+      };
     }
-
-    return {
-      status: res.status,
-      ok: res.ok,
-      url,
-      data: json,
-    };
   },
 });
 
-// ---------- Tool 3: añadir a watchlist de Trakt ----------
-
-const watchlistAddTool = tool({
-  name: "yen_watchlist_add",
-  description: `
-Añade una película a la watchlist de Trakt y opcionalmente al vector store
-usando el endpoint /trakt/watchlist/add.
-`.trim(),
-  parameters: z
-    .object({
-      title: z
-        .string()
-        .nullable()
-        .describe(
-          "Título de la película (recomendado si quieres escribir en el vector store)."
-        ),
-      year: z
-        .number()
-        .int()
-        .nullable()
-        .describe("Año o null."),
-      trakt_id: z
-        .string()
-        .nullable()
-        .describe("ID de Trakt si se conoce, o null."),
-      imdb: z
-        .string()
-        .nullable()
-        .describe("ID de IMDb (ej: tt0816692) o null."),
-      slug: z
-        .string()
-        .nullable()
-        .describe("Slug de Trakt o null."),
-      tmdb: z
-        .string()
-        .nullable()
-        .describe("ID de TMDB o null."),
-      tags: z
-        .array(z.string())
-        .nullable()
-        .describe("Lista de tags o null."),
-      comment: z
-        .string()
-        .nullable()
-        .describe("Comentario libre o null."),
-      writeToVector: z
-        .boolean()
-        .nullable()
-        .describe(
-          "true para escribir también en el vector store si hay título, false para sólo Trakt, null para usar el valor por defecto del backend (true)."
-        ),
-    })
-    .strict(),
-  strict: true,
-  async execute(args) {
-    const url = `${YEN_BACKEND_URL}/trakt/watchlist/add`;
-
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(args),
-    });
-
-    const text = await res.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = { raw: text };
-    }
-
-    return {
-      status: res.status,
-      ok: res.ok,
-      url,
-      data: json,
-    };
-  },
-});
-
-// ---------- Tool 4: quitar de watchlist de Trakt ----------
-
-const watchlistRemoveTool = tool({
-  name: "yen_watchlist_remove",
-  description: `
-Quita una película de la watchlist de Trakt y opcionalmente escribe el evento
-en el vector store usando /trakt/watchlist/remove.
-`.trim(),
-  parameters: z
-    .object({
-      title: z
-        .string()
-        .nullable()
-        .describe(
-          "Título de la película (sólo necesario si quieres registrar el evento en el vector store)."
-        ),
-      year: z
-        .number()
-        .int()
-        .nullable()
-        .describe("Año o null."),
-      trakt_id: z
-        .string()
-        .nullable()
-        .describe("ID de Trakt si se conoce, o null."),
-      imdb: z
-        .string()
-        .nullable()
-        .describe("ID de IMDb o null."),
-      slug: z
-        .string()
-        .nullable()
-        .describe("Slug de Trakt o null."),
-      tmdb: z
-        .string()
-        .nullable()
-        .describe("ID de TMDB o null."),
-      tags: z
-        .array(z.string())
-        .nullable()
-        .describe("Lista de tags o null."),
-      comment: z
-        .string()
-        .nullable()
-        .describe("Comentario libre o null."),
-      writeToVector: z
-        .boolean()
-        .nullable()
-        .describe(
-          "true para escribir en el vector store si hay título, false para sólo Trakt, null para usar el valor por defecto del backend (true)."
-        ),
-    })
-    .strict(),
-  strict: true,
-  async execute(args) {
-    const url = `${YEN_BACKEND_URL}/trakt/watchlist/remove`;
-
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(args),
-    });
-
-    const text = await res.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = { raw: text };
-    }
-
-    return {
-      status: res.status,
-      ok: res.ok,
-      url,
-      data: json,
-    };
-  },
-});
-
-// ---------- Agent principal: YenMoviesAgent ----------
+// ---------- Agent principal: YenMoviesAgent ------------------------------
 
 export const yenMoviesAgent = new Agent({
   name: "YenMoviesAgent",
@@ -333,72 +194,73 @@ export const yenMoviesAgent = new Agent({
   tools: [
     webSearchTool(),
     fileSearchTool(process.env.VECTOR_STORE_ID),
-    markSeenTool,
-    importTraktHistoryTool,
-    watchlistAddTool,
-    watchlistRemoveTool,
+    traktTool,
+    memoryTool,
   ],
   instructions: `
-Eres el cerebro de las recomendaciones de cine y series de Yen.
+Eres el cerebro de cine/series y memoria multimedia de Yen.
 
-Contexto:
-- Tu memoria persistente vive en un vector store llamado YenVectorMovies.
-  - Contiene documentos JSONL con películas vistas, importadas desde Trakt y watchlist.
-  - Campos típicos: type, title, year, ids (trakt_id, imdb, tmdb, slug),
-    rating, liked, state, source, tags, comment, marked_at.
-- El backend de Yen en Railway escribe en ese vector store y sincroniza con Trakt.
+Tienes:
+- Un vector store persistente (YenVectorMovies) accesible vía file_search y yen_memory.
+- Trakt como backend externo para historial, watchlist y otros datos de cuenta,
+  accesible de forma genérica vía yen_trakt.
+- Acceso a la web para encontrar endpoints de Trakt, información de pelis/series,
+  plataformas de streaming, etc.
 
-Objetivos:
-1) Recordar lo que Yen ha visto, lo que tiene en watchlist y sus preferencias.
-2) Darle recomendaciones de películas/series que encajen con sus gustos.
-3) Mantener la memoria actualizada cuando te diga que ha visto algo nuevo
-   o modifique su watchlist.
-4) Usar la web para enriquecer información (sinopsis, críticas, dónde ver, etc.).
+PIENSA EN TÉRMINOS DE 4 OPERACIONES GENÉRICAS:
 
-Herramientas:
-- file_search (YenVectorMovies):
-  - Úsalo para:
-    - Saber si una película ya se ha visto.
-    - Leer watchlist y notas asociadas (tags, comment).
-    - Consultar historial importado de Trakt.
-- web_search:
-  - Úsalo para:
-    - Obtener información actualizada (fechas de estreno, puntuaciones, plataformas).
-    - Investigar películas o series que no estén en memoria.
-- yen_mark_seen:
-  - Úsalo cuando Yen diga que ha visto algo nuevo o quieras marcarlo como visto.
-  - Pasa título y año si los conoces, y los IDs que tengas (trakt_id, imdb, slug, tmdb).
-  - Si algo no lo sabes, pon null.
-- yen_import_trakt_history:
-  - Úsalo cuando te pida importar o refrescar su historial de Trakt.
-  - Si no estás seguro del límite, usa limit = null y deja que el backend decida.
-- yen_watchlist_add:
-  - Úsalo para añadir a la watchlist de Trakt.
-  - Debes proporcionar al menos un ID (trakt_id, imdb, slug o tmdb).
-  - Si también quieres que se registre en el vector store, pasa title y opcionalmente year, tags, comment.
-- yen_watchlist_remove:
-  - Úsalo para quitar de la watchlist de Trakt.
-  - Igual: necesitas al menos un ID, y opcionalmente title/year/tags/comment si quieres registrar el evento.
+1) BUSCAR / LEER:
+   - Usa SIEMPRE:
+     - file_search → para leer la memoria persistente en el vector store.
+     - web_search → para información externa, doc de Trakt, fichas de pelis, etc.
 
-Comportamiento:
-- Entiende siempre primero la intención del usuario.
-- Si Yen dice que ha visto algo nuevo:
-  - Llama a yen_mark_seen.
-- Si pide importar o refrescar historial de Trakt:
-  - Llama a yen_import_trakt_history.
-- Si pide gestionar watchlist:
-  - Usa yen_watchlist_add o yen_watchlist_remove.
-- Si necesitas saber qué ha visto o qué tiene en watchlist:
-  - Usa file_search sobre YenVectorMovies.
-- Si necesitas datos adicionales o descubrir nuevas pelis/series:
-  - Usa web_search.
+2) ESCRIBIR MEMORIA:
+   - Usa yen_memory con operation='write'.
+   - payloadJson debe ser un string JSON que describa lo que quieras recordar.
+     Por ejemplo:
+       {"type":"mood","value":"quiere terror espacial slow-burn","timestamp":"..."}
+       {"type":"movie_seen","title":"Ash","year":2025,"tags":["space_horror"]}
 
-Siempre responde en el idioma de Yen (normalmente español),
-explicando brevemente qué has consultado o cambiado (memoria, Trakt, etc.).
+3) BORRAR MEMORIA:
+   - Si en algún momento quieres eliminar un archivo concreto del vector store,
+     usa yen_memory con operation='delete' y fileId igual al fileId devuelto
+     anteriormente por yen_memory.write o por el backend.
+
+4) ACCIONES EN TRAKT:
+   - Usa yen_trakt como martillo genérico para cualquier endpoint:
+     - method: GET, POST, PUT o DELETE
+     - path: ruta de Trakt empezando por '/', ej:
+         '/sync/history'
+         '/sync/history/remove'
+         '/sync/watchlist'
+         '/sync/watchlist/remove'
+     - bodyJson: JSON string con el cuerpo que exige Trakt.
+   - Cuando no sepas el endpoint exacto:
+     - Usa web_search para consultar la documentación de Trakt.
+     - Después llama a yen_trakt con los parámetros correctos.
+
+COMPORTAMIENTO:
+
+- Antes de recomendar nada, intenta entender:
+  - Qué ha visto Yen (consulta file_search).
+  - Qué le gusta / mood actual (notas previas en la memoria, tipo 'mood' o 'preferences').
+- Cuando Yen te diga que ha visto algo, o exprese un gusto estable, o una nueva regla:
+  - Guarda esa info con yen_memory.write en un JSON que sea fácil de interpretar
+    en el futuro (usa campos como type, title, year, tags, comment, source, timestamp).
+- Cuando cambies algo en Trakt (historial, watchlist, etc.):
+  - Siempre que tenga sentido, refleja ese cambio también en la memoria con yen_memory.write
+    para mantener un diario coherente de eventos (por ejemplo type='trakt_event').
+
+- Gestiona sesiones usando el sessionId que recibas del backend: 
+  el contexto de conversación viene dado por el parámetro sessionId que te pasa run().
+
+Responde SIEMPRE en el idioma de Yen (normalmente español) y explica de forma breve
+qué has hecho con tus herramientas (por ejemplo: "he consultado tu memoria",
+"he actualizado Trakt", "he guardado una nota de gusto", etc.).
 `.trim(),
 });
 
-// ---------- Helper para llamarlo desde server.mjs ----------
+// ---------- Helper para llamarlo desde server.mjs ------------------------
 
 export async function runYenMoviesAgent(input, options = {}) {
   const { sessionId } = options;

@@ -70,7 +70,8 @@ function buildMovieDocument(movie) {
       marked_at: now,
       tags: movie.tags ?? [],
       comment: movie.comment ?? null,
-    }) + "\n"
+    }) + "
+"
   );
 }
 

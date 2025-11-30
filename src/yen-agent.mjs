@@ -41,9 +41,12 @@ Llama al backend de cine de Yen en Railway.
     method: z.enum(["GET", "POST"]).default("POST"),
     body: z
       .record(z.any())
-      .describe("Cuerpo JSON a enviar al backend, según el endpoint.")
-      .optional(),
+      .nullable()
+      .describe(
+        "Cuerpo JSON a enviar al backend, según el endpoint. Usa null cuando no haga falta enviar body."
+      ),
   }),
+
   strict: true,
   async execute({ path, method, body }) {
     const url = `${YEN_BACKEND_URL}${path}`;
@@ -53,8 +56,12 @@ Llama al backend de cine de Yen en Railway.
       headers: {
         "Content-Type": "application/json",
       },
-      body: method === "POST" ? JSON.stringify(body || {}) : undefined,
+      body:
+        method === "POST" && body != null
+          ? JSON.stringify(body)
+          : undefined,
     });
+
 
     const text = await res.text();
     let json = null;

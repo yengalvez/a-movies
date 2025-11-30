@@ -11,5 +11,8 @@
     "express": "^4.21.2",
     "openai": "^6.3.0",
     "node-fetch": "^3.3.2"
+    "@openai/agents": "^0.1.0",
+    "@openai/agents-openai": "^0.1.0",
+    "zod": "^3.0.0",
   }
 }

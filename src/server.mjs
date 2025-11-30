@@ -1,3 +1,4 @@
+// src/server.mjs
 import express from "express";
 import dotenv from "dotenv";
 import OpenAI from "openai";
@@ -6,7 +7,7 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
-import { yenMoviesAgent, runYenMoviesAgent } from "./yen-agent.mjs";
+import { runYenMoviesAgent } from "./yen-agent.mjs";
 
 // Cargar .env SOLO si estamos en local (en Railway no hace falta)
 if (!process.env.RAILWAY_ENVIRONMENT) {
@@ -45,7 +46,6 @@ if (!VECTOR_STORE_ID) {
 }
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
 
 const app = express();
 app.use(express.json());
@@ -96,7 +96,7 @@ async function uploadTextToVectorStore(text) {
       {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${OPENAI_API_KEY}`,
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
           "Content-Type": "application/json",
           "OpenAI-Beta": "assistants=v2",
         },
@@ -126,7 +126,6 @@ async function uploadTextToVectorStore(text) {
     fs.promises.unlink(tmpPath).catch(() => {});
   }
 }
-
 
 // ---------- Helpers: Trakt -----------------------------------------------
 
@@ -264,6 +263,8 @@ app.get("/", (req, res) => {
         "Añade una película a la watchlist de Trakt y opcionalmente la registra en el Vector Store.",
       "POST /trakt/watchlist/remove":
         "Quita una película de la watchlist de Trakt y opcionalmente la registra en el Vector Store.",
+      "POST /agent/chat":
+        "Punto de entrada al cerebro YenMoviesAgent (Agents SDK + gpt-5.1).",
     },
   });
 });
@@ -531,7 +532,7 @@ app.post("/trakt/watchlist/remove", async (req, res) => {
   }
 });
 
-// ---------- Start server -----------------------------------------------
+// ---------- Nuevo: endpoint del Agent (cerebro) ---------------------------
 
 app.post("/agent/chat", async (req, res) => {
   try {
@@ -561,6 +562,8 @@ app.post("/agent/chat", async (req, res) => {
     });
   }
 });
+
+// ---------- Start server -----------------------------------------------
 
 const listenPort = PORT || 3000;
 app.listen(listenPort, () => {

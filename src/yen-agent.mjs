@@ -1,5 +1,4 @@
-// yen-agent.mjs
-import OpenAI from "openai";
+// src/yen-agent.mjs
 import { Agent, run, tool } from "@openai/agents";
 import {
   OpenAIResponsesModel,
@@ -7,14 +6,15 @@ import {
   fileSearchTool,
 } from "@openai/agents-openai";
 import { z } from "zod";
+import fetch from "node-fetch";
 
-// ---------- OpenAI client & model ----------
-
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// ---------- Modelo OpenAI (Responses + gpt-5.1) ----------
 
 const model = new OpenAIResponsesModel({
-  client: openai,
-  model: "gpt-5.1", // Modelo actual de razonamiento general
+  model: "gpt-5.1",
+  clientOptions: {
+    apiKey: process.env.OPENAI_API_KEY,
+  },
 });
 
 // ---------- Tool: backend de Yen en Railway ----------
@@ -39,6 +39,7 @@ Llama al backend de cine de Yen en Railway.
       "/trakt/watchlist/remove",
     ]),
     method: z.enum(["GET", "POST"]).default("POST"),
+    // IMPORTANTE: no optional(), solo nullable() para que la API no se queje
     body: z
       .record(z.any())
       .nullable()
@@ -46,7 +47,6 @@ Llama al backend de cine de Yen en Railway.
         "Cuerpo JSON a enviar al backend, según el endpoint. Usa null cuando no haga falta enviar body."
       ),
   }),
-
   strict: true,
   async execute({ path, method, body }) {
     const url = `${YEN_BACKEND_URL}${path}`;
@@ -56,12 +56,12 @@ Llama al backend de cine de Yen en Railway.
       headers: {
         "Content-Type": "application/json",
       },
+      // Solo mandamos body si existe y no es null
       body:
         method === "POST" && body != null
           ? JSON.stringify(body)
           : undefined,
     });
-
 
     const text = await res.text();
     let json = null;
@@ -152,6 +152,8 @@ Siempre responde en el idioma de Yen (normalmente español),
 explicando brevemente qué has consultado o cambiado (memoria, Trakt, etc.).
 `.trim(),
 });
+
+// ---------- Helper para llamarlo desde server.mjs ----------
 
 export async function runYenMoviesAgent(input, options = {}) {
   const { sessionId } = options;

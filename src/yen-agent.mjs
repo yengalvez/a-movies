@@ -38,9 +38,10 @@ Llama al backend de cine de Yen en Railway.
       "/trakt/watchlist/add",
       "/trakt/watchlist/remove",
     ]),
-    method: z.enum(["GET", "POST"]).default("POST"),
+    method: z.enum(["GET", "POST"]),
     body: z
-      .record(z.any())
+      .object({})
+      .passthrough()
       .nullable()
       .describe(
         "Cuerpo JSON a enviar al backend, según el endpoint. Usa null cuando no haga falta enviar body."

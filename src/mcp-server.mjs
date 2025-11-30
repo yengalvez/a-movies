@@ -27,6 +27,8 @@ if (!VECTOR_STORE_ID) {
 }
 
 // --- Helper: búsqueda naive sobre ficheros del vector store -------------
+// Nota: sigue siendo genérico, pero ahora devuelve más estructura:
+// title, year, ids, raw, etc.
 async function naiveVectorStoreSearch({ query, topK, filterTags }) {
   if (!OPENAI_API_KEY || !VECTOR_STORE_ID) {
     throw new Error("OPENAI_API_KEY or VECTOR_STORE_ID not configured");
@@ -80,7 +82,10 @@ async function naiveVectorStoreSearch({ query, topK, filterTags }) {
     const text = await fileResp.text();
     if (!text) continue;
 
-    const lines = text.split("\n").filter((line) => line.trim().length > 0);
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
 
     for (const line of lines) {
       if (results.length >= maxResults) break;
@@ -89,38 +94,53 @@ async function naiveVectorStoreSearch({ query, topK, filterTags }) {
       try {
         doc = JSON.parse(line);
       } catch {
-        continue;
+        // Si no es JSON, lo tratamos como nota de texto libre
+        doc = { text: line };
       }
 
       const tags = Array.isArray(doc.tags) ? doc.tags : [];
+      const kind = doc.kind || doc.type || null;
+
       if (requiredTags) {
         const hasAll = requiredTags.every((t) => tags.includes(t));
         if (!hasAll) continue;
       }
 
-      const haystack = (
-        (doc.text || "") +
-        " " +
-        (doc.title || "") +
-        " " +
-        (doc.comment || "") +
-        " " +
-        JSON.stringify(tags) +
-        " " +
-        (doc.kind || "") +
-        " " +
-        (doc.type || "")
-      ).toLowerCase();
+      const haystack =
+        (
+          (doc.text || "") +
+          " " +
+          (doc.title || "") +
+          " " +
+          (doc.comment || "") +
+          " " +
+          JSON.stringify(tags) +
+          " " +
+          (kind || "")
+        ).toLowerCase();
 
       if (!haystack.includes(queryLower)) continue;
 
+      const mainText = doc.text || doc.title || line;
+
       results.push({
-        text: doc.text || doc.title || JSON.stringify(doc),
-        kind: doc.kind || doc.type || "unknown",
+        text: mainText,
+        kind,
         tags,
         created_at: doc.created_at || doc.marked_at || null,
         score: 1,
+        raw: doc,
+
+        // Campos típicos de pelis si existen
+        title: doc.title ?? null,
+        year: doc.year ?? null,
+        trakt_id: doc.trakt_id ?? null,
+        imdb: doc.imdb ?? null,
+        slug: doc.slug ?? null,
+        tmdb: doc.tmdb ?? null,
       });
+
+      if (results.length >= maxResults) break;
     }
   }
 
@@ -148,9 +168,13 @@ function registerYenMoviesTools(server) {
   server.registerTool(
     "trakt_request",
     {
-      title: "Trakt generic HTTP request",
+      title: "Petición genérica a Trakt",
       description:
-        "Realiza una petición genérica a la API de Trakt usando las credenciales del servidor. Úsalo para leer o modificar historial, watchlist o buscar contenido.",
+        "Realiza peticiones genéricas a la API de Trakt usando las credenciales del servidor. " +
+        "Úsala para leer o modificar historial, watchlist o buscar contenido. " +
+        "Patrón recomendado: cuando necesites un ID de película a partir de un título, usa primero GET /search/movie " +
+        "(con query y year si se conoce), guarda los IDs obtenidos en memoria con memory_write y reutilízalos después " +
+        "en /sync/history o /sync/watchlist.",
       inputSchema: traktRequestSchema,
       outputSchema: traktResponseSchema,
     },
@@ -240,7 +264,9 @@ function registerYenMoviesTools(server) {
     {
       title: "Persistent memory write",
       description:
-        "Guarda una nota persistente en el vector store YenVectorMovies. Úsalo para registrar pelis vistas, watchlist, gustos, moods, notas de perfil, etc.",
+        "Guarda una nota persistente en el vector store YenVectorMovies (memoria larga de Yen). " +
+        "Úsalo para registrar eventos de películas (movie_event), estados de ánimo (mood), reglas (rule), " +
+        "manuales internos del sistema (system_manual) o conocimiento sobre herramientas externas (tool_knowledge).",
       inputSchema: memoryWriteSchema,
       outputSchema: memoryWriteResponseSchema,
     },
@@ -286,11 +312,31 @@ function registerYenMoviesTools(server) {
   const memorySearchResponseSchema = z.object({
     results: z.array(
       z.object({
+        // Texto principal para que el modelo lo lea
         text: z.string(),
-        kind: z.string().optional(),
-        tags: z.array(z.string()).optional(),
+
+        // Tipo lógico de la nota (movie_event, mood, rule, system_manual, etc.)
+        kind: z.string().nullable().optional(),
+
+        // Tags asociadas
+        tags: z.array(z.string()).nullable().optional(),
+
+        // Cuándo se creó / marcó (si existe)
         created_at: z.string().nullable().optional(),
-        score: z.number().optional(),
+
+        // Para futuros rankings si quieres hacerlo menos naive
+        score: z.number().nullable().optional(),
+
+        // Documento entero tal cual se guardó (JSON completo)
+        raw: z.any().optional(),
+
+        // Campos específicos que suelen existir en notas de películas
+        title: z.string().nullable().optional(),
+        year: z.number().nullable().optional(),
+        trakt_id: z.union([z.string(), z.number()]).nullable().optional(),
+        imdb: z.string().nullable().optional(),
+        slug: z.string().nullable().optional(),
+        tmdb: z.union([z.string(), z.number()]).nullable().optional(),
       })
     ),
   });
@@ -300,7 +346,10 @@ function registerYenMoviesTools(server) {
     {
       title: "Persistent memory search",
       description:
-        "Busca en la memoria persistente de Yen (vector store) textos relacionados con una consulta.",
+        "Busca en la memoria persistente de Yen (vector store YenVectorMovies) notas relacionadas con una consulta. " +
+        "Úsala antes de actuar para recordar gustos, histórico de películas, estados de ánimo, reglas internas " +
+        "o manuales del propio sistema. Los resultados incluyen, cuando existan, campos útiles como title, year " +
+        "e IDs de Trakt, además del documento completo en 'raw'.",
       inputSchema: memorySearchSchema,
       outputSchema: memorySearchResponseSchema,
     },

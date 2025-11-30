@@ -22,10 +22,7 @@ console.log(
   "DEBUG OPENAI VARS:",
   Object.keys(process.env).filter((k) => k.includes("OPENAI"))
 );
-console.log(
-  "DEBUG has OPENAI_API_KEY?",
-  !!process.env.OPENAI_API_KEY
-);
+console.log("DEBUG has OPENAI_API_KEY?", !!process.env.OPENAI_API_KEY);
 
 const {
   OPENAI_API_KEY,
@@ -78,7 +75,7 @@ async function uploadTextToVectorStore(text) {
   const tmpDir = os.tmpdir();
   const tmpPath = path.join(
     tmpDir,
-    `yen-movie-${Date.now()}-${Math.random().toString(36).slice(2)}.txt` // <- .txt, NO .jsonl
+    `yen-movie-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`
   );
 
   await fs.promises.writeFile(tmpPath, text, "utf8");
@@ -117,7 +114,6 @@ async function uploadTextToVectorStore(text) {
       vsFile.id
     );
 
-    // El resto del código solo usa fileId
     return { fileId: file.id };
   } catch (err) {
     console.error("❌ Error uploading to vector store:", err);
@@ -263,6 +259,12 @@ app.get("/", (req, res) => {
         "Añade una película a la watchlist de Trakt y opcionalmente la registra en el Vector Store.",
       "POST /trakt/watchlist/remove":
         "Quita una película de la watchlist de Trakt y opcionalmente la registra en el Vector Store.",
+      "POST /trakt/proxy":
+        "Proxy genérico para llamar a cualquier endpoint de Trakt.",
+      "POST /vector/write":
+        "Escribe texto arbitrario en el vector store (memoria genérica).",
+      "POST /vector/delete-file":
+        "Elimina un archivo completo del vector store por file_id.",
       "POST /agent/chat":
         "Punto de entrada al cerebro YenMoviesAgent (Agents SDK + gpt-5.1).",
     },
@@ -532,7 +534,150 @@ app.post("/trakt/watchlist/remove", async (req, res) => {
   }
 });
 
-// ---------- Nuevo: endpoint del Agent (cerebro) ---------------------------
+// ---------- Nuevo: proxy genérico para Trakt -----------------------------
+
+app.post("/trakt/proxy", async (req, res) => {
+  try {
+    const { method, path: traktPath, bodyJson } = req.body || {};
+
+    if (!["GET", "POST", "PUT", "DELETE"].includes(method)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid method. Use GET, POST, PUT or DELETE.",
+      });
+    }
+
+    if (!traktPath || typeof traktPath !== "string" || !traktPath.startsWith("/")) {
+      return res.status(400).json({
+        ok: false,
+        error: "path must be a string starting with '/'.",
+      });
+    }
+
+    ensureTraktConfigured();
+
+    const url = `https://api.trakt.tv${traktPath}`;
+
+    const fetchOptions = {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "trakt-api-version": "2",
+        "trakt-api-key": TRAKT_CLIENT_ID,
+        Authorization: `Bearer ${TRAKT_ACCESS_TOKEN}`,
+      },
+    };
+
+    if (bodyJson) {
+      fetchOptions.body = bodyJson;
+    }
+
+    const resp = await fetch(url, fetchOptions);
+    const text = await resp.text();
+
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = { raw: text };
+    }
+
+    res.json({
+      ok: resp.ok,
+      status: resp.status,
+      url,
+      data: json,
+    });
+  } catch (err) {
+    console.error("❌ /trakt/proxy error:", err);
+    res.status(500).json({
+      ok: false,
+      error: "internal_error",
+      details: String(err.message || err),
+    });
+  }
+});
+
+// ---------- Nuevo: memoria genérica en vector store ----------------------
+
+// Escribir texto arbitrario en el vector store
+app.post("/vector/write", async (req, res) => {
+  try {
+    const { payloadText } = req.body || {};
+
+    if (!payloadText || typeof payloadText !== "string") {
+      return res.status(400).json({
+        ok: false,
+        error: "payloadText is required (string)",
+      });
+    }
+
+    // Aseguramos que termina en salto de línea para JSONL-compatible
+    const text = payloadText.endsWith("\n")
+      ? payloadText
+      : payloadText + "\n";
+
+    const { fileId } = await uploadTextToVectorStore(text);
+
+    res.json({
+      ok: true,
+      fileId,
+    });
+  } catch (err) {
+    console.error("❌ /vector/write error:", err);
+    res.status(500).json({
+      ok: false,
+      error: "internal_error",
+      details: String(err.message || err),
+    });
+  }
+});
+
+// Eliminar un archivo completo del vector store
+app.post("/vector/delete-file", async (req, res) => {
+  try {
+    const { file_id } = req.body || {};
+
+    if (!file_id || typeof file_id !== "string") {
+      return res.status(400).json({
+        ok: false,
+        error: "file_id is required (string)",
+      });
+    }
+
+    const resp = await fetch(
+      `https://api.openai.com/v1/vector_stores/${VECTOR_STORE_ID}/files/${file_id}`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+        },
+      }
+    );
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(
+        `Vector store delete failed ${resp.status}: ${body}`
+      );
+    }
+
+    res.json({
+      ok: true,
+      file_id,
+    });
+  } catch (err) {
+    console.error("❌ /vector/delete-file error:", err);
+    res.status(500).json({
+      ok: false,
+      error: "internal_error",
+      details: String(err.message || err),
+    });
+  }
+});
+
+// ---------- Endpoint del Agent (cerebro) --------------------------------
 
 app.post("/agent/chat", async (req, res) => {
   try {

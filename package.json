@@ -14,6 +14,6 @@
     "@openai/agents": "^0.1.0",
     "@openai/agents-openai": "^0.1.0",
     "zod": "^3.0.0",
-    "@modelcontextprotocol/sdk": "^0.4.1"
+    "@modelcontextprotocol/sdk": "latest"
   }
 }

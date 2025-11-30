@@ -6,6 +6,7 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
+import { yenMoviesAgent, runYenMoviesAgent } from "./yen-agent.mjs";
 
 // Cargar .env SOLO si estamos en local (en Railway no hace falta)
 if (!process.env.RAILWAY_ENVIRONMENT) {
@@ -531,6 +532,35 @@ app.post("/trakt/watchlist/remove", async (req, res) => {
 });
 
 // ---------- Start server -----------------------------------------------
+
+app.post("/agent/chat", async (req, res) => {
+  try {
+    const { message, sessionId } = req.body || {};
+
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({
+        ok: false,
+        error: "message is required (string)",
+      });
+    }
+
+    const result = await runYenMoviesAgent(message, {
+      sessionId: sessionId || "default-session",
+    });
+
+    res.json({
+      ok: true,
+      reply: result.text,
+    });
+  } catch (err) {
+    console.error("❌ /agent/chat error:", err);
+    res.status(500).json({
+      ok: false,
+      error: "agent_internal_error",
+      details: String(err.message || err),
+    });
+  }
+});
 
 const listenPort = PORT || 3000;
 app.listen(listenPort, () => {

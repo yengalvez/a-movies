@@ -1,13 +1,13 @@
 // src/server.mjs
 import express from "express";
 import dotenv from "dotenv";
-import OpenAI from "openai";
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { fileURLToPath } from "url";
 import fetch from "node-fetch";
+import { fileURLToPath } from "url";
+import path from "path";
+
 import { runYenMoviesAgent } from "./yen-agent.mjs";
+import { uploadTextToVectorStore } from "./vector-helpers.mjs";
+import { handleMcpRequest } from "./mcp-server.mjs";
 
 // Cargar .env SOLO si estamos en local (en Railway no hace falta)
 if (!process.env.RAILWAY_ENVIRONMENT) {
@@ -42,12 +42,10 @@ if (!VECTOR_STORE_ID) {
   process.exit(1);
 }
 
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
 const app = express();
 app.use(express.json());
 
-// ---------- Helpers: Vector Store ----------------------------------------
+// ---------- Helpers: Vector Store documents ----------------------------------------
 
 function buildMovieDocument(movie) {
   const now = new Date().toISOString();
@@ -69,58 +67,6 @@ function buildMovieDocument(movie) {
       comment: movie.comment ?? null,
     }) + "\n"
   );
-}
-
-async function uploadTextToVectorStore(text) {
-  const tmpDir = os.tmpdir();
-  const tmpPath = path.join(
-    tmpDir,
-    `yen-movie-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`
-  );
-
-  await fs.promises.writeFile(tmpPath, text, "utf8");
-
-  try {
-    // 1) Subir archivo a OpenAI Files
-    const file = await openai.files.create({
-      file: fs.createReadStream(tmpPath),
-      purpose: "assistants",
-    });
-
-    // 2) Adjuntar el file al Vector Store usando la API HTTP directa
-    const resp = await fetch(
-      `https://api.openai.com/v1/vector_stores/${VECTOR_STORE_ID}/files`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-          "OpenAI-Beta": "assistants=v2",
-        },
-        body: JSON.stringify({ file_id: file.id }),
-      }
-    );
-
-    if (!resp.ok) {
-      const body = await resp.text();
-      throw new Error(`Vector store attach failed ${resp.status}: ${body}`);
-    }
-
-    const vsFile = await resp.json();
-    console.log(
-      "✅ Uploaded to vector store. file.id =",
-      file.id,
-      "vsFile.id =",
-      vsFile.id
-    );
-
-    return { fileId: file.id };
-  } catch (err) {
-    console.error("❌ Error uploading to vector store:", err);
-    throw err;
-  } finally {
-    fs.promises.unlink(tmpPath).catch(() => {});
-  }
 }
 
 // ---------- Helpers: Trakt -----------------------------------------------
@@ -247,7 +193,7 @@ async function traktModifyWatchlist(action, ids) {
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    message: "Yen Cine Agent running",
+    message: "Yen Cine Agent running (MCP + Agents)",
     vectorStoreId: VECTOR_STORE_ID,
     traktConfigured: !!(TRAKT_CLIENT_ID && TRAKT_ACCESS_TOKEN),
     endpoints: {
@@ -259,14 +205,10 @@ app.get("/", (req, res) => {
         "Añade una película a la watchlist de Trakt y opcionalmente la registra en el Vector Store.",
       "POST /trakt/watchlist/remove":
         "Quita una película de la watchlist de Trakt y opcionalmente la registra en el Vector Store.",
-      "POST /trakt/proxy":
-        "Proxy genérico para llamar a cualquier endpoint de Trakt.",
-      "POST /vector/write":
-        "Escribe texto arbitrario en el vector store (memoria genérica).",
-      "POST /vector/delete-file":
-        "Elimina un archivo completo del vector store por file_id.",
       "POST /agent/chat":
         "Punto de entrada al cerebro YenMoviesAgent (Agents SDK + gpt-5.1).",
+      "POST /mcp":
+        "Endpoint MCP remoto para el conector de ChatGPT (Yen Movies MCP).",
     },
   });
 });
@@ -292,7 +234,6 @@ app.post("/mark-seen", async (req, res) => {
       return res.status(400).json({ error: "title is required (string)" });
     }
 
-    // 1) Escribir en Vector Store
     const doc = buildMovieDocument({
       type: "movie_seen",
       title,
@@ -313,7 +254,6 @@ app.post("/mark-seen", async (req, res) => {
 
     const { fileId } = await uploadTextToVectorStore(doc);
 
-    // 2) Opcional: escribir en Trakt history
     let traktResult = null;
     if (
       syncTrakt &&
@@ -534,150 +474,7 @@ app.post("/trakt/watchlist/remove", async (req, res) => {
   }
 });
 
-// ---------- Nuevo: proxy genérico para Trakt -----------------------------
-
-app.post("/trakt/proxy", async (req, res) => {
-  try {
-    const { method, path: traktPath, bodyJson } = req.body || {};
-
-    if (!["GET", "POST", "PUT", "DELETE"].includes(method)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Invalid method. Use GET, POST, PUT or DELETE.",
-      });
-    }
-
-    if (!traktPath || typeof traktPath !== "string" || !traktPath.startsWith("/")) {
-      return res.status(400).json({
-        ok: false,
-        error: "path must be a string starting with '/'.",
-      });
-    }
-
-    ensureTraktConfigured();
-
-    const url = `https://api.trakt.tv${traktPath}`;
-
-    const fetchOptions = {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": TRAKT_CLIENT_ID,
-        Authorization: `Bearer ${TRAKT_ACCESS_TOKEN}`,
-      },
-    };
-
-    if (bodyJson) {
-      fetchOptions.body = bodyJson;
-    }
-
-    const resp = await fetch(url, fetchOptions);
-    const text = await resp.text();
-
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = { raw: text };
-    }
-
-    res.json({
-      ok: resp.ok,
-      status: resp.status,
-      url,
-      data: json,
-    });
-  } catch (err) {
-    console.error("❌ /trakt/proxy error:", err);
-    res.status(500).json({
-      ok: false,
-      error: "internal_error",
-      details: String(err.message || err),
-    });
-  }
-});
-
-// ---------- Nuevo: memoria genérica en vector store ----------------------
-
-// Escribir texto arbitrario en el vector store
-app.post("/vector/write", async (req, res) => {
-  try {
-    const { payloadText } = req.body || {};
-
-    if (!payloadText || typeof payloadText !== "string") {
-      return res.status(400).json({
-        ok: false,
-        error: "payloadText is required (string)",
-      });
-    }
-
-    // Aseguramos que termina en salto de línea para JSONL-compatible
-    const text = payloadText.endsWith("\n")
-      ? payloadText
-      : payloadText + "\n";
-
-    const { fileId } = await uploadTextToVectorStore(text);
-
-    res.json({
-      ok: true,
-      fileId,
-    });
-  } catch (err) {
-    console.error("❌ /vector/write error:", err);
-    res.status(500).json({
-      ok: false,
-      error: "internal_error",
-      details: String(err.message || err),
-    });
-  }
-});
-
-// Eliminar un archivo completo del vector store
-app.post("/vector/delete-file", async (req, res) => {
-  try {
-    const { file_id } = req.body || {};
-
-    if (!file_id || typeof file_id !== "string") {
-      return res.status(400).json({
-        ok: false,
-        error: "file_id is required (string)",
-      });
-    }
-
-    const resp = await fetch(
-      `https://api.openai.com/v1/vector_stores/${VECTOR_STORE_ID}/files/${file_id}`,
-      {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "assistants=v2",
-        },
-      }
-    );
-
-    if (!resp.ok) {
-      const body = await resp.text();
-      throw new Error(
-        `Vector store delete failed ${resp.status}: ${body}`
-      );
-    }
-
-    res.json({
-      ok: true,
-      file_id,
-    });
-  } catch (err) {
-    console.error("❌ /vector/delete-file error:", err);
-    res.status(500).json({
-      ok: false,
-      error: "internal_error",
-      details: String(err.message || err),
-    });
-  }
-});
-
-// ---------- Endpoint del Agent (cerebro) --------------------------------
+// ---------- Agent SDK endpoint (opcional, ya existente) ---------------------------
 
 app.post("/agent/chat", async (req, res) => {
   try {
@@ -705,6 +502,23 @@ app.post("/agent/chat", async (req, res) => {
       error: "agent_internal_error",
       details: String(err.message || err),
     });
+  }
+});
+
+// ---------- MCP endpoint (para ChatGPT conector HTTP) ---------------------------
+
+app.post("/mcp", async (req, res) => {
+  try {
+    await handleMcpRequest(req, res);
+  } catch (err) {
+    console.error("❌ /mcp error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        ok: false,
+        error: "mcp_internal_error",
+        details: String(err.message || err),
+      });
+    }
   }
 });
 

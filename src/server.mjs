@@ -70,12 +70,11 @@ function buildMovieDocument(movie) {
       marked_at: now,
       tags: movie.tags ?? [],
       comment: movie.comment ?? null,
-    }) + "
-"
+    }) + "\n"
   );
 }
 
-async function uploadTextToVectorStore(text)(text) {
+async function uploadTextToVectorStore(text) {
   const tmpDir = os.tmpdir();
   const tmpPath = path.join(
     tmpDir,

@@ -75,7 +75,7 @@ function buildMovieDocument(movie) {
   );
 }
 
-async function uploadTextToVectorStore(text) {
+async function uploadTextToVectorStore(text)(text) {
   const tmpDir = os.tmpdir();
   const tmpPath = path.join(
     tmpDir,
